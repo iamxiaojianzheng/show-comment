@@ -204,54 +204,48 @@ public final class LineEndDocCache implements Disposable {
         return info.file.getPath() + '\u0000' + info.lineNumber + '\u0000' + info.text;
     }
 
+    private static final class LineComputeResult {
+        @Nullable
+        final LineExtensionInfo result;
+        final boolean notReady;
+        final long fileModStamp;
+        final long settingsModCount;
+
+        LineComputeResult(@Nullable LineExtensionInfo result, boolean notReady,
+                          long fileModStamp, long settingsModCount) {
+            this.result = result;
+            this.notReady = notReady;
+            this.fileModStamp = fileModStamp;
+            this.settingsModCount = settingsModCount;
+        }
+    }
+
     private void schedule(@NotNull LineInfo info, @NotNull String key, long now) {
         @Nullable Long since = pending.get(key);
         if (since != null && now - since < PENDING_TIMEOUT_MS) {
             return;
         }
         pending.put(key, now);
-        try {
-            ApplicationManager.getApplication().executeOnPooledThread(() ->
-                    doCompute(info, key, now));
-        } catch (Throwable e) {
-            // conditional: do not drop a marker that a newer schedule has just put
-            pending.remove(key, now);
-            LOG.info("LineEndDocCache schedule catch Throwable but log to record.", e);
-        }
+        AsyncDocExecutor.submitCancellableTask(
+                info.project,
+                () -> doCompute(info),
+                res -> finish(info.project, info.file, key, res.result, res.notReady,
+                        res.fileModStamp, res.settingsModCount, now),
+                () -> pending.remove(key, now)
+        );
     }
 
     /**
-     * Pooled thread: safe to wait for smart mode here, it never blocks the EDT.
-     *
-     * @param token the value this schedule put into {@link #pending}; removes are conditional on
-     *              it so a late task cannot clear a marker of a newer schedule
+     * Non-blocking background compute in smart mode: safe to resolve PSI and cancels cooperatively
+     * when write actions or EDT write-intent actions request the lock.
      */
-    private void doCompute(@NotNull LineInfo info, @NotNull String key, long token) {
-        @NotNull Project project = info.project;
-        try {
-            if (project.isDisposed()) {
-                pending.remove(key, token);
-                return;
-            }
-            DumbService.getInstance(project).runReadActionInSmartMode(() -> {
-                // a pooled thread may still carry the flag of the task that used it before
-                PsiDocCache.consumeNotReadyFlag();
-                long fileModStamp = info.file.getModificationStamp();
-                long settingsModCount = currentSettingsModCount(project);
-                @Nullable LineExtensionInfo result = computeSafe(info);
-                // true = the compute ended on a nested doc compute that had not finished yet:
-                // this null is "not computed yet" and not "no doc"
-                boolean notReady = PsiDocCache.consumeNotReadyFlag();
-                ApplicationManager.getApplication().invokeLater(() ->
-                        finish(project, info.file, key, result, notReady, fileModStamp, settingsModCount, token));
-            });
-        } catch (ProcessCanceledException e) {
-            // aborted (PSI changed or indexing started), retry on next paint
-            pending.remove(key, token);
-        } catch (Throwable e) {
-            pending.remove(key, token);
-            LOG.info("LineEndDocCache compute catch Throwable but log to record.", e);
-        }
+    private static @NotNull LineComputeResult doCompute(@NotNull LineInfo info) {
+        PsiDocCache.consumeNotReadyFlag();
+        long fileModStamp = info.file.getModificationStamp();
+        long settingsModCount = currentSettingsModCount(info.project);
+        @Nullable LineExtensionInfo result = computeSafe(info);
+        boolean notReady = PsiDocCache.consumeNotReadyFlag();
+        return new LineComputeResult(result, notReady, fileModStamp, settingsModCount);
     }
 
     /**
@@ -372,11 +366,8 @@ public final class LineEndDocCache implements Disposable {
      */
     private static void repaintEditors(@NotNull Project project, @NotNull VirtualFile file) {
         try {
-            // getEditors(VirtualFile, Project) does not exist in the 2020.1 API
+            // 零锁与零 I/O 契约：仅当文档已在内存中缓存时才重绘对应编辑器，严禁在 EDT 上同步从磁盘加载 Document
             @Nullable Document document = FileDocumentManager.getInstance().getCachedDocument(file);
-            if (document == null) {
-                document = FileDocumentManager.getInstance().getDocument(file);
-            }
             if (document == null) {
                 return;
             }

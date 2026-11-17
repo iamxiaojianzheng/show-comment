@@ -293,6 +293,17 @@ public final class RenderDocCache implements Disposable {
         pending.entrySet().removeIf(since -> now - since.getValue() > PENDING_HARD_TTL_MS);
     }
 
+    private static final class RenderComputeResult {
+        @Nullable
+        final String result;
+        final boolean notReady;
+
+        RenderComputeResult(@Nullable String result, boolean notReady) {
+            this.result = result;
+            this.notReady = notReady;
+        }
+    }
+
     private void schedule(@NotNull Project project, @NotNull Object key,
                           @NotNull Supplier<String> compute, @NotNull Runnable onComputed, long now) {
         @Nullable Long since = pending.get(key);
@@ -300,46 +311,24 @@ public final class RenderDocCache implements Disposable {
             return;
         }
         pending.put(key, now);
-        try {
-            ApplicationManager.getApplication().executeOnPooledThread(() ->
-                    doCompute(project, key, compute, onComputed, now));
-        } catch (Throwable e) {
-            // conditional: do not drop a marker that a newer schedule has just put
-            pending.remove(key, now);
-            LOG.info("RenderDocCache schedule catch Throwable but log to record.", e);
-        }
+        AsyncDocExecutor.submitCancellableTask(
+                project,
+                () -> doCompute(project, compute),
+                res -> finish(project, key, res.result, res.notReady, onComputed, now),
+                () -> pending.remove(key, now)
+        );
     }
 
     /**
-     * Pooled thread: safe to wait for smart mode here, it never blocks the EDT.
-     *
-     * @param token the value this schedule put into {@link #pending}; removes are conditional on
-     *              it so a late task cannot clear a marker of a newer schedule
+     * Non-blocking background compute in smart mode: safe to resolve PSI and cancels cooperatively
+     * when write actions or EDT write-intent actions request the lock.
      */
-    private void doCompute(@NotNull Project project, @NotNull Object key,
-                           @NotNull Supplier<String> compute, @NotNull Runnable onComputed, long token) {
-        try {
-            if (project.isDisposed()) {
-                pending.remove(key, token);
-                return;
-            }
-            DumbService.getInstance(project).runReadActionInSmartMode(() -> {
-                // a pooled thread may still carry the flag of the task that used it before
-                PsiDocCache.consumeNotReadyFlag();
-                @Nullable String result = computeSafe(project, compute);
-                // true = the compute ended on a nested doc compute that had not finished yet:
-                // this null is "not computed yet" and not "no doc"
-                boolean notReady = PsiDocCache.consumeNotReadyFlag();
-                ApplicationManager.getApplication().invokeLater(() ->
-                        finish(project, key, result, notReady, onComputed, token));
-            });
-        } catch (ProcessCanceledException e) {
-            // aborted (PSI changed or indexing started), retry on next paint
-            pending.remove(key, token);
-        } catch (Throwable e) {
-            pending.remove(key, token);
-            LOG.info("RenderDocCache compute catch Throwable but log to record.", e);
-        }
+    private static @NotNull RenderComputeResult doCompute(@NotNull Project project,
+                                                          @NotNull Supplier<String> compute) {
+        PsiDocCache.consumeNotReadyFlag();
+        @Nullable String result = computeSafe(project, compute);
+        boolean notReady = PsiDocCache.consumeNotReadyFlag();
+        return new RenderComputeResult(result, notReady);
     }
 
     /**

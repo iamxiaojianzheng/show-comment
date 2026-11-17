@@ -98,13 +98,24 @@ public abstract class FileLoader {
     void loadFile(@NotNull VirtualFile file, @Nullable Project project) {
         if (skipFile(file)) return;
         if (project != null && DumbService.isDumb(project)) return;
-        ApplicationManager.getApplication().executeOnPooledThread(() ->
-                ApplicationManager.getApplication().runReadAction(() -> {
-                    loadFileImpl(file, project);
-                    if (project != null && !project.isDisposed()) {
-                        Tree.refreshProjectView(project);
-                    }
-                }));
+        if (project != null) {
+            ReadAction.nonBlocking(() -> {
+                loadFileImpl(file, project);
+                return true;
+            }).inSmartMode(project)
+              .expireWhen(project::isDisposed)
+              .finishOnUiThread(com.intellij.openapi.application.ModalityState.any(), ignored -> {
+                  if (!project.isDisposed()) {
+                      Tree.refreshProjectView(project);
+                  }
+              })
+              .submit(AppExecutorUtil.getAppExecutorService());
+        } else {
+            ReadAction.nonBlocking(() -> {
+                loadFileImpl(file, null);
+                return true;
+            }).submit(AppExecutorUtil.getAppExecutorService());
+        }
     }
 
     public void copy(@NotNull VirtualFile file, @NotNull VirtualFile newFile) {
