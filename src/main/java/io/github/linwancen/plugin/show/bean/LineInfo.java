@@ -15,7 +15,7 @@ public class LineInfo extends FileInfo {
 
     protected LineInfo(@NotNull FileInfo info, @NotNull String text,
                        int lineCount, int lineNumber, int startOffset, int endOffset) {
-        super(info.file, info.document, info.project, FuncEnum.LINE);
+        super(info);
         this.lineCount = lineCount;
         this.lineNumber = lineNumber;
         this.startOffset = startOffset;

@@ -54,18 +54,16 @@ public class LineEnd extends EditorLinePainter {
         if (globalSettings.onlySelectLine && LineSelect.notSelectLine(project, lineNumber)) {
             return null;
         }
+        if (!appSettings.lineEndCache) {
+            // Even with the cache option off, this runs on EDT while painting: never resolve
+            // PSI here. LineEndDocCache uses a zero-allocation fast path on EDT cache hit.
+            return LineEndDocCache.getLineExtensions(project, file, lineNumber);
+        }
         @Nullable LineInfo info = LineInfo.of(file, project, lineNumber);
         if (info == null) {
             return null;
         }
-        if (info.appSettings.lineEndCache) {
-            return LineEndCacheUtils.get(info);
-        } else {
-            // Even with the cache option off, this runs on EDT while painting: never resolve
-            // PSI here. LineEndDocCache reads memory on EDT, computes on a pooled thread and
-            // repaints the editors when the doc is ready (a miss paints nothing for a moment).
-            return LineEndDocCache.getLineExtensions(info);
-        }
+        return LineEndCacheUtils.get(info);
     }
 
     @Nullable

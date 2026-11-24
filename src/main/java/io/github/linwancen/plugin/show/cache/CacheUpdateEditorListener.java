@@ -24,6 +24,7 @@ public class CacheUpdateEditorListener implements FileEditorManagerListener {
     @Override
     public void fileClosed(@NotNull FileEditorManager source, @NotNull VirtualFile file) {
         @NotNull Project project = source.getProject();
+        LineEndDocCache.evictFile(project, file);
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             if (project.isDisposed()) {
                 LineEndCacheUtils.cache.remove(project);

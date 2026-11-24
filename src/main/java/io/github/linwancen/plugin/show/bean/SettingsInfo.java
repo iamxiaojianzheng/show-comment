@@ -24,6 +24,15 @@ public class SettingsInfo {
         this.dumbService = DumbService.getInstance(project);
     }
 
+    protected SettingsInfo(@NotNull SettingsInfo other) {
+        this.project = other.project;
+        this.funcEnum = other.funcEnum;
+        this.appSettings = other.appSettings;
+        this.globalSettings = other.globalSettings;
+        this.projectSettings = other.projectSettings;
+        this.dumbService = other.dumbService;
+    }
+
     public static @NotNull SettingsInfo of(@NotNull Project project, @NotNull FuncEnum funcEnum) {
         return new SettingsInfo(project, funcEnum);
     }

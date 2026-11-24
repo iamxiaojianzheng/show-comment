@@ -29,6 +29,13 @@ public class FileInfo extends SettingsInfo {
         this.inject = InjectedLanguageManager.getInstance(project);
     }
 
+    protected FileInfo(@NotNull FileInfo other) {
+        super(other);
+        this.file = other.file;
+        this.document = other.document;
+        this.inject = other.inject;
+    }
+
     public static @NotNull FileInfo of(@NotNull VirtualFile file, @NotNull Document document, @NotNull Project project) {
         return new FileInfo(file, document, project, FuncEnum.LINE);
     }
