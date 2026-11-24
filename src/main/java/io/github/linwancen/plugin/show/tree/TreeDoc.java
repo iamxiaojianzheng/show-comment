@@ -32,6 +32,7 @@ public final class TreeDoc {
         if (element == null || !element.isValid()) {
             return null;
         }
+        BaseLangDoc.ensureLoaded();
         @NotNull SettingsInfo info = SettingsInfo.of(project, FuncEnum.TREE);
 
         @Nullable VirtualFile file = TreeElements.virtualFile(element);

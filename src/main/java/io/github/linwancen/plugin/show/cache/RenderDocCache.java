@@ -5,6 +5,7 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.progress.ProcessCanceledException;
 import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.concurrency.AppExecutorUtil;
 import io.github.linwancen.plugin.show.Tree;
 import io.github.linwancen.plugin.show.settings.AppSettingsState;
@@ -15,6 +16,9 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.WeakHashMap;
@@ -116,6 +120,18 @@ public final class RenderDocCache implements Disposable {
         }
     }
 
+    private final @NotNull Project project;
+    private final @NotNull AppSettingsState appSettings;
+    private final @NotNull GlobalSettingsState globalSettings;
+    private final @NotNull ProjectSettingsState projectSettings;
+
+    public RenderDocCache(@NotNull Project project) {
+        this.project = project;
+        this.appSettings = AppSettingsState.getInstance();
+        this.globalSettings = GlobalSettingsState.getInstance();
+        this.projectSettings = ProjectSettingsState.getInstance(project);
+    }
+
     /**
      * Weak keys: tree nodes are dropped by GC after a tree rebuild, no leak.
      * Reads/writes happen on EDT (render + finish), {@link #dispose()} may run on the closing
@@ -172,7 +188,7 @@ public final class RenderDocCache implements Disposable {
             entry = docs.get(key);
         }
         long currentDataStamp = CacheStampResolver.getModificationStamp(project, key);
-        long currentSettingsStamp = currentSettingsModCount(project);
+        long currentSettingsStamp = currentSettingsModCount();
         if (entry != null && !entry.notReady) {
             if (entry.doc != null && !entry.doc.isEmpty()) {
                 if (entry.dataModStamp == currentDataStamp && entry.settingsModCount == currentSettingsStamp) {
@@ -207,15 +223,15 @@ public final class RenderDocCache implements Disposable {
 
     /**
      * Invalidate cached docs for a specific virtual file across all key representations.
+     *
+     * @return true if at least one cached/pending entry for this file existed and was evicted
      */
-    public static void invalidateFile(@NotNull Project project, @NotNull com.intellij.openapi.vfs.VirtualFile file) {
+    public static boolean invalidateFile(@NotNull Project project, @NotNull VirtualFile file) {
         if (project.isDisposed()) {
-            return;
+            return false;
         }
         @Nullable RenderDocCache cache = project.getService(RenderDocCache.class);
-        if (cache != null) {
-            cache.evictFile(file);
-        }
+        return cache != null && cache.evictFile(file);
     }
 
     private void evict(@NotNull Object key) {
@@ -225,15 +241,28 @@ public final class RenderDocCache implements Disposable {
         }
     }
 
-    private void evictFile(@NotNull com.intellij.openapi.vfs.VirtualFile file) {
-        pending.remove(file);
+    private boolean evictFile(@NotNull VirtualFile file) {
+        boolean removed = pending.remove(file) != null;
         synchronized (this) {
-            docs.remove(file);
-            docs.entrySet().removeIf(e -> {
-                com.intellij.openapi.vfs.VirtualFile f = CacheStampResolver.resolveVirtualFile(e.getKey());
-                return file.equals(f);
-            });
+            if (docs.remove(file) != null) {
+                removed = true;
+            }
+            Iterator<Map.Entry<Object, Entry>> it = docs.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<Object, Entry> e = it.next();
+                Object key = e.getKey();
+                if (key == null || key instanceof VirtualFile) {
+                    continue;
+                }
+                @Nullable VirtualFile f = CacheStampResolver.resolveVirtualFile(key);
+                if (file.equals(f)) {
+                    it.remove();
+                    pending.remove(key);
+                    removed = true;
+                }
+            }
         }
+        return removed;
     }
 
     /**
@@ -242,17 +271,36 @@ public final class RenderDocCache implements Disposable {
      * that loaded before PSI indices were ready show their docs automatically.
      */
     public void onExitDumbMode(@NotNull Project project) {
+        @Nullable List<Object> evictedKeys = null;
         synchronized (this) {
-            docs.entrySet().removeIf(e -> e.getValue().doc == null || e.getValue().notReady);
+            Iterator<Map.Entry<Object, Entry>> it = docs.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<Object, Entry> e = it.next();
+                Entry val = e.getValue();
+                if (val == null || val.doc == null || val.notReady) {
+                    if (evictedKeys == null) {
+                        evictedKeys = new ArrayList<>();
+                    }
+                    Object k = e.getKey();
+                    if (k != null) {
+                        evictedKeys.add(k);
+                    }
+                    it.remove();
+                }
+            }
         }
-        pending.clear();
+        if (evictedKeys != null) {
+            for (Object k : evictedKeys) {
+                pending.remove(k);
+            }
+        }
         Tree.refreshProjectView(project);
     }
 
-    private static long currentSettingsModCount(@NotNull Project project) {
-        return AppSettingsState.getInstance().getModificationCount()
-                + GlobalSettingsState.getInstance().getModificationCount()
-                + ProjectSettingsState.getInstance(project).getModificationCount();
+    private long currentSettingsModCount() {
+        return appSettings.getModificationCount()
+                + globalSettings.getModificationCount()
+                + projectSettings.getModificationCount();
     }
 
     /**
@@ -265,6 +313,7 @@ public final class RenderDocCache implements Disposable {
      */
     @Override
     public void dispose() {
+        AsyncDocExecutor.purgeDisposed(project);
         pending.clear();
         synchronized (this) {
             docs.clear();
@@ -366,7 +415,7 @@ public final class RenderDocCache implements Disposable {
         boolean retry;
         boolean changed;
         long dataModStamp = CacheStampResolver.getModificationStamp(project, key);
-        long settingsModCount = currentSettingsModCount(project);
+        long settingsModCount = currentSettingsModCount();
         synchronized (this) {
             @Nullable Entry old = docs.get(key);
             @Nullable String oldDoc = old == null ? null : old.doc;

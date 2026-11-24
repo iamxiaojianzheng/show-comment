@@ -49,10 +49,15 @@ public class DocCacheUpdateFileListener implements BulkFileListener {
                 if (project.isDisposed()) {
                     continue;
                 }
+                boolean invalidated = false;
                 for (@NotNull VirtualFile file : changedFiles) {
-                    RenderDocCache.invalidateFile(project, file);
+                    if (RenderDocCache.invalidateFile(project, file)) {
+                        invalidated = true;
+                    }
                 }
-                Tree.refreshProjectView(project);
+                if (invalidated) {
+                    Tree.refreshProjectView(project);
+                }
             }
         } catch (Throwable e) {
             LOG.info("DocCacheUpdateFileListener catch Throwable but log to record.", e);
