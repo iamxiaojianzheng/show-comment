@@ -9,10 +9,15 @@ import io.github.linwancen.plugin.show.settings.AbstractSettingsState;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.Collections;
 import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.regex.Pattern;
 
 class DirDoc {
+    private static final Map<VirtualFile, Long> LOADED_TSV_STAMPS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
     private DirDoc() {}
 
     @Nullable
@@ -26,7 +31,12 @@ class DirDoc {
             @Nullable ConfCache confCache = FileLoader.EPN.findExtension(ConfCache.class);
             VirtualFile virtualFile = file.getVirtualFile();
             if (confCache != null && virtualFile != null) {
-                confCache.loadFileImpl(virtualFile, psiDirectory.getProject());
+                long stamp = virtualFile.getModificationStamp();
+                Long loadedStamp = LOADED_TSV_STAMPS.get(virtualFile);
+                if (loadedStamp == null || loadedStamp != stamp) {
+                    confCache.loadFileImpl(virtualFile, psiDirectory.getProject());
+                    LOADED_TSV_STAMPS.put(virtualFile, stamp);
+                }
             }
         }
         for (@NotNull Map.Entry<String, Pattern[]> patterns : patternMap.entrySet()) {

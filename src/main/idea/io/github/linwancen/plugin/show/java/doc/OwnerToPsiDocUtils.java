@@ -1,5 +1,6 @@
 package io.github.linwancen.plugin.show.java.doc;
 
+import com.intellij.openapi.progress.ProcessCanceledException;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiClass;
 import com.intellij.psi.PsiClassOwner;
@@ -15,10 +16,26 @@ import io.github.linwancen.plugin.show.lang.base.BaseLangDoc;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.Locale;
+import java.util.Set;
+
 /**
  * call PackageFileToPsiDoc, PsiMethodToPsiDoc, PsiClassUtils
  */
 public class OwnerToPsiDocUtils {
+
+    /**
+     * 明显不可能通过 SPI 或 "xx-ClassName.ext" 关联到 Java 类的常见非类资源扩展名，
+     * 避免在 TreeDoc 跨语言回退时对大量普通文件执行无意义的全局 PsiShortNamesCache 查询。
+     */
+    private static final Set<String> SKIP_CLASS_LOOKUP_EXTS = Set.of(
+            "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "bmp",
+            "class", "jar", "zip", "tar", "gz", "7z", "war", "ear",
+            "md", "txt", "log", "csv", "tsv", "regexp",
+            "gitignore", "gitattributes", "editorconfig", "lock",
+            "sh", "bat", "cmd", "ps1", "gradle", "kts",
+            "css", "scss", "less", "woff", "woff2", "ttf", "eot", "pdf"
+    );
 
     private OwnerToPsiDocUtils() {}
 
@@ -27,6 +44,8 @@ public class OwnerToPsiDocUtils {
         PsiElement navElement;
         try {
             navElement = psiDocCommentOwner.getNavigationElement();
+        } catch (ProcessCanceledException e) {
+            throw e;
         } catch (Exception e) {
             return null;
         }
@@ -35,6 +54,8 @@ public class OwnerToPsiDocUtils {
         }
         try {
             return psiDocCommentOwner.getDocComment();
+        } catch (ProcessCanceledException e) {
+            throw e;
         } catch (Exception e) {
             return null;
         }
@@ -66,11 +87,14 @@ public class OwnerToPsiDocUtils {
             return null;
         }
         if (!(psiFile instanceof PsiClassOwner)) {
+            @Nullable VirtualFile virtualFile = psiFile.getVirtualFile();
+            if (shouldSkipClassLookup(virtualFile)) {
+                return null;
+            }
             // for SPI
             @NotNull PsiClass[] psiClasses = PsiClassUtils.nameToClass(psiFile.getName(), psiFile.getProject());
             // for "ClassName-...-ClassName.xxx"
             if (psiClasses.length == 0) {
-                VirtualFile virtualFile = psiFile.getVirtualFile();
                 psiClasses = PsiClassUtils.fileToClasses(virtualFile, psiFile.getProject());
             }
             for (@NotNull PsiClass psiClass : psiClasses) {
@@ -95,5 +119,16 @@ public class OwnerToPsiDocUtils {
         PsiClass psiClass = classes[0];
         // support to kotlin data class
         return BaseLangDoc.resolveDoc(info, psiClass);
+    }
+
+    private static boolean shouldSkipClassLookup(@Nullable VirtualFile virtualFile) {
+        if (virtualFile == null) {
+            return false;
+        }
+        @Nullable String ext = virtualFile.getExtension();
+        if (ext == null || ext.isEmpty()) {
+            return false;
+        }
+        return SKIP_CLASS_LOOKUP_EXTS.contains(ext.toLowerCase(Locale.ROOT));
     }
 }

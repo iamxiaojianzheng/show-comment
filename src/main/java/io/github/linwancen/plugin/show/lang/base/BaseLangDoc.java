@@ -3,6 +3,7 @@ package io.github.linwancen.plugin.show.lang.base;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.EditorLinePainter;
 import com.intellij.openapi.editor.LineExtensionInfo;
+import com.intellij.openapi.progress.ProcessCanceledException;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.FileViewProvider;
@@ -21,16 +22,17 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.Collection;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
 
 /**
  *
  */
 public abstract class BaseLangDoc extends EditorLinePainter {
-    public static final Map<String, BaseLangDoc> LANG_DOC_MAP = new LinkedHashMap<>();
+    public static final Map<String, BaseLangDoc> LANG_DOC_MAP = new ConcurrentHashMap<>();
+    private static volatile boolean langDocsLoaded;
 
     static {
         try {
@@ -39,6 +41,30 @@ public abstract class BaseLangDoc extends EditorLinePainter {
             @NotNull BaseLangDoc lang = (BaseLangDoc) clazz.getConstructor().newInstance();
             LANG_DOC_MAP.put("kotlin", lang);
         } catch (Exception ignored) {}
+    }
+
+    /**
+     * 确保所有通过 {@code editor.linePainter} 扩展点注册的语言处理器（如 JavaLangDoc、GoLangDoc 等）
+     * 在首次树视图/行末解析前均已完成类加载并注册进 {@link #LANG_DOC_MAP}，
+     * 防止启动期树视图先于编辑器渲染时查不到语言处理器而永久污染 {@link PsiDocCache}。
+     */
+    public static void ensureLoaded() {
+        if (langDocsLoaded) {
+            return;
+        }
+        synchronized (BaseLangDoc.class) {
+            if (langDocsLoaded) {
+                return;
+            }
+            try {
+                EditorLinePainter.EP_NAME.getExtensionList();
+            } catch (ProcessCanceledException e) {
+                throw e;
+            } catch (Throwable ignored) {
+                // 非完整平台环境（如纯单测）安全降级
+            }
+            langDocsLoaded = true;
+        }
     }
 
     public abstract @NotNull List<Class<? extends PsiElement>> getRefClass();
@@ -64,6 +90,7 @@ public abstract class BaseLangDoc extends EditorLinePainter {
     }
 
     public static @Nullable String langDoc(@NotNull LineInfo info) {
+        ensureLoaded();
         // psiFile.getText() may be not equals document.getText()
         @Nullable FileViewProvider viewProvider = PsiManager.getInstance(info.project).findViewProvider(info.file);
         if (viewProvider == null) {
@@ -72,6 +99,8 @@ public abstract class BaseLangDoc extends EditorLinePainter {
         @Nullable PsiElement element;
         try {
             element = viewProvider.findElementAt(info.endOffset);
+        } catch (ProcessCanceledException e) {
+            throw e;
         } catch (Throwable ignored) {
             // InvalidVirtualFileAccessException
             return null;
@@ -194,6 +223,9 @@ public abstract class BaseLangDoc extends EditorLinePainter {
                     return null;
                 }
                 resolve = reference.resolve();
+            } catch (ProcessCanceledException e) {
+                // 严禁吞掉协作式取消异常，交由 ReadAction.nonBlocking 自动重试，避免将中断态误缓存为 null
+                throw e;
             } catch (Throwable e) {
                 // a cancelled/broken resolve throws instead of returning, so mark here too:
                 // otherwise a timeout inside resolve() would never be detected as slow
@@ -220,6 +252,7 @@ public abstract class BaseLangDoc extends EditorLinePainter {
      */
     public static @Nullable <T extends SettingsInfo> String resolveDoc(@NotNull T info,
                                                                        @NotNull PsiElement resolve) {
+        ensureLoaded();
         try {
             if (!resolve.isValid()) {
                 return null;
@@ -229,6 +262,8 @@ public abstract class BaseLangDoc extends EditorLinePainter {
             if (navElement != null) {
                 resolve = navElement;
             }
+        } catch (ProcessCanceledException e) {
+            throw e;
         } catch (Throwable ignore) {
             // ignore
         }
