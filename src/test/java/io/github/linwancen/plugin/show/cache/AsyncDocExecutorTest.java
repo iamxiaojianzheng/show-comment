@@ -6,11 +6,10 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 验证异步受控调度器 {@link AsyncDocExecutor} 的并发门禁、取消清理与状态隔离机制。
+ * 验证异步受控调度器 {@link AsyncDocExecutor} 的项目销毁拒绝、有界排队接纳与清理机制。
  */
 class AsyncDocExecutorTest {
 
@@ -44,17 +43,21 @@ class AsyncDocExecutorTest {
     }
 
     @Test
-    void testSemaphoreBoundaryThrottle() throws Exception {
-        Field semaphoreField = AsyncDocExecutor.class.getDeclaredField("SEMAPHORE");
-        semaphoreField.setAccessible(true);
-        Semaphore semaphore = (Semaphore) semaphoreField.get(null);
+    void testQueueAcceptanceAndPurgeWhenConcurrencySaturated() throws Exception {
+        Field dispatcherField = AsyncDocExecutor.class.getDeclaredField("DISPATCHER");
+        dispatcherField.setAccessible(true);
+        BoundedAsyncDispatcher<?> dispatcher = (BoundedAsyncDispatcher<?>) dispatcherField.get(null);
 
-        // 占满全部许可
-        int permits = semaphore.availablePermits();
-        semaphore.acquire(permits);
+        Field activeCountField = BoundedAsyncDispatcher.class.getDeclaredField("activeCount");
+        activeCountField.setAccessible(true);
+        Field maxConcurrentField = BoundedAsyncDispatcher.class.getDeclaredField("maxConcurrent");
+        maxConcurrentField.setAccessible(true);
+
+        int maxConcurrent = maxConcurrentField.getInt(dispatcher);
+        int oldActive = activeCountField.getInt(dispatcher);
+        activeCountField.setInt(dispatcher, maxConcurrent);
         try {
             Project mockProject = createMockProject(false);
-
             AtomicBoolean cancelled = new AtomicBoolean(false);
             boolean submitted = AsyncDocExecutor.submitCancellableTask(
                     mockProject,
@@ -63,12 +66,15 @@ class AsyncDocExecutorTest {
                     () -> cancelled.set(true)
             );
 
-            Assertions.assertFalse(submitted, "Task must be rejected when semaphore is saturated");
-            Assertions.assertTrue(cancelled.get(), "Saturated semaphore must trigger cleanup callback");
-        } finally {
-            semaphore.release(permits);
-        }
+            Assertions.assertTrue(submitted, "Task must be queued rather than dropped when concurrency is saturated");
+            Assertions.assertFalse(cancelled.get(), "Queued task must not trigger cleanup prematurely");
+            Assertions.assertEquals(1, dispatcher.getQueueSize());
 
-        Assertions.assertEquals(permits, semaphore.availablePermits(), "Permits must be fully restored");
+            AsyncDocExecutor.purgeDisposed(mockProject);
+            Assertions.assertTrue(cancelled.get(), "Purged task must trigger cleanup callback");
+            Assertions.assertEquals(0, dispatcher.getQueueSize());
+        } finally {
+            activeCountField.setInt(dispatcher, oldActive);
+        }
     }
 }

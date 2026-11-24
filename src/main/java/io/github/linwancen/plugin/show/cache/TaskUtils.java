@@ -7,6 +7,7 @@ import com.intellij.openapi.wm.WindowManager;
 import com.intellij.util.concurrency.AppExecutorUtil;
 import com.intellij.util.concurrency.EdtExecutorService;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.concurrency.CancellablePromise;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,11 +33,25 @@ public class TaskUtils {
         taskMap.computeIfAbsent(project,
                 project1 -> AppExecutorUtil.getAppScheduledExecutorService().scheduleWithFixedDelay(() -> {
                     try {
+                        if (project.isDisposed()) {
+                            T removed = cache.remove(project);
+                            if (removed != null) {
+                                running.remove(removed);
+                            }
+                            ScheduledFuture<?> task = taskMap.remove(project);
+                            if (task != null) {
+                                task.cancel(true);
+                            }
+                            return;
+                        }
                         T t = cache.get(project);
                         if (t == null) {
                             return;
                         }
                         EdtExecutorService.getInstance().execute(() -> {
+                            if (project.isDisposed()) {
+                                return;
+                            }
                             JFrame frame = WindowManager.getInstance().getFrame(project);
                             if (frame != null && !frame.isActive()) {
                                 return;
@@ -45,24 +60,33 @@ public class TaskUtils {
                             if (!flag.compareAndSet(false, true)) {
                                 return;
                             }
-                            ReadAction.nonBlocking(() -> {
-                                        if (project.isDisposed()) {
-                                            running.remove(t);
-                                            cache.remove(project);
-                                            ScheduledFuture<?> task = taskMap.remove(project);
-                                            if (task != null) {
-                                                task.cancel(true);
+                            boolean submitted = false;
+                            try {
+                                CancellablePromise<Void> promise = ReadAction.nonBlocking(() -> {
+                                            if (project.isDisposed()) {
+                                                running.remove(t);
+                                                cache.remove(project);
+                                                ScheduledFuture<?> task = taskMap.remove(project);
+                                                if (task != null) {
+                                                    task.cancel(true);
+                                                }
+                                                return (Void) null;
                                             }
-                                            return;
-                                        }
-                                        try {
                                             func.accept(t);
-                                        } catch (Exception e) {
-                                            flag.set(false);
-                                        }
-                                    })
-                                    .inSmartMode(project)
-                                    .submit(AppExecutorUtil.getAppExecutorService());
+                                            return (Void) null;
+                                        })
+                                        .inSmartMode(project)
+                                        .expireWhen(project::isDisposed)
+                                        .submit(AppExecutorUtil.getAppExecutorService());
+                                submitted = true;
+                                promise.onProcessed(ignored -> flag.set(false));
+                            } catch (Throwable e) {
+                                LOG.info("TaskUtils submit catch Throwable but log to record.", e);
+                            } finally {
+                                if (!submitted) {
+                                    flag.set(false);
+                                }
+                            }
                         });
                     } catch (ProcessCanceledException ignored) {
                     } catch (Throwable e) {
